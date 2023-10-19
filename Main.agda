@@ -33,6 +33,7 @@ open import Scotty hiding (isParameter; splitPaths; countParams; get)
 open import Text.Lazy using (LazyString)
 open import Server
 open import Route
+open import JSON
 
 
 instance
@@ -53,37 +54,32 @@ instance
   charEncodable : HttpEncodable Char
   charEncodable = record { encode = λ _ → "" ; decode = λ _ → nothing }
 
-handler : ℕ → String → String
+handler : ℕ → String → Scotty.ActionM String
 handler id name =
-  "Hello, " ++ name ++ "!\n" ++
-  "Your id is " ++ Nat.show id ++ "."
+  Scotty.ActionM.pure ("Hello, " ++ name ++ "!\n" ++
+                       "Your id is " ++ Nat.show id ++ ".")
 
-get : Route
-get = Get "/user/:id/:name" (⟪ ℕ × String ⟫) String handler
+handler₁ : ℕ → Scotty.ActionM ℕ
+handler₁ id = Scotty.ActionM.pure (suc id)
 
-handler₁ : ℕ → ℕ
-handler₁ id = suc id
-
-get₁ : Route
-get₁ = Get "/user/:id" ⟨ ℕ ⟩ ℕ handler₁
-
-routes : List Route
-routes = get ∷ get₁ ∷ []
-
-handler₂ : String
-handler₂ = "Hello, world!"
-
-get₂ : Route
-get₂ = Get "/user" Mk String handler₂
+handler₂ : Scotty.ActionM String
+handler₂ = Scotty.ActionM.pure "Hello, world!"
 
 main' : IO ⊤
 main' = Server.start 4000 routes' {{s≤s z≤n}}
   where
     routes' : List Route
     routes' = do
-      Get "/user/:id/:name" (⟪ ℕ × String ⟫) String handler
-      Get "/user/:id" ⟨ ℕ ⟩ ℕ handler₁
-      Get "/user" Mk String handler₂
+      Get "/user/:id/:name" will receive ⟪ ℕ × String ⟫
+                                 return String
+                                 through handler
+
+      Get "/user/:id" will receive ℕ
+                           return ℕ
+                           through handler₁
+
+      Get "/user" will return String
+                       through handler₂
       end
       where open Route.Route
 

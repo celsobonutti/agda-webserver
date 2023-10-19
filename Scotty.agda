@@ -2,6 +2,7 @@
 module Scotty where
 
 open import Data.Nat using (ℕ)
+open import Data.Maybe using (Maybe; just; nothing)
 open import Data.String using (String; wordsBy)
 import IO.Primitive as Prim
 import Agda.Builtin.Unit as Prim
@@ -40,28 +41,35 @@ captureParam' = captureParam
 Param : Set
 Param = Pair Text.Lazy Text.Lazy
 
+record HttpEncodable {a} (A : Set a) : Set a where
+  field
+    encode : A → String
+    decode : String → Maybe A
+
+open HttpEncodable {{...}} public
+
 postulate
   ScottyM : Set → Set
   ActionM : Set → Set
   RoutePattern : Set
   Capture : Text.Lazy → RoutePattern
-  get : RoutePattern → ActionM Prim.⊤ → ScottyM Prim.⊤
+  get' : RoutePattern → ActionM Prim.⊤ → ScottyM Prim.⊤
   scotty' : ℕ → ScottyM Prim.⊤ → Prim.IO Prim.⊤
   text' : Text.Lazy → ActionM Prim.⊤
   raise : {A : Set} → Text.Lazy → ActionM A
   captureParams' : ActionM (List Param)
-  captureParam : Text.Lazy → ActionM String
+  captureParam' : Text.Lazy → ActionM String
 
 {-# COMPILE GHC ActionM = type ActionM #-}
 {-# COMPILE GHC ScottyM = type ScottyM #-}
 {-# COMPILE GHC RoutePattern = type RoutePattern #-}
 {-# COMPILE GHC Capture = Capture #-}
-{-# COMPILE GHC get = get #-}
+{-# COMPILE GHC get' = get #-}
 {-# COMPILE GHC scotty' = \p -> scotty (fromIntegral p) #-}
 {-# COMPILE GHC text' = text #-}
 {-# COMPILE GHC raise = \_ -> raise #-}
 {-# COMPILE GHC captureParams' = captureParams #-}
-{-# COMPILE GHC captureParam = captureParam' #-}
+{-# COMPILE GHC captureParam' = captureParam' #-}
 
 module ActionM where
   postulate
@@ -80,6 +88,9 @@ module ScottyM where
   {-# COMPILE GHC _>>=_ = \_ _ -> (>>=) #-}
   {-# COMPILE GHC _>>_ = \_ _ -> (>>) #-}
   {-# COMPILE GHC pure = \_ -> pure #-}
+
+get : String → ActionM Prim.⊤ → ScottyM Prim.⊤
+get = get' ∘ Capture ∘ Text.fromStrict
 
 text : String → ActionM Prim.⊤
 text = text' ∘ Text.fromStrict
@@ -115,6 +126,13 @@ getParams = Vec.map (String.fromList ∘ dropDoubleCollon ∘ String.toList) ∘
 replaceVecSize : ∀ {n m : ℕ} {A : Set} → Vec A n → (n ≡ m) → Vec A m
 replaceVecSize xs refl = xs
 
+getParam : (route : String) → { countParams route ≡ 1 } → String
+getParam route { params } =
+  Vec.head param
+  where
+    param : Vec String 1
+    param = replaceVecSize (getParams route) params
+
 captureParams : {route : String} → ActionM (Vec Param (countParams route))
 captureParams {route} = do
   params ← captureParams'
@@ -123,3 +141,13 @@ captureParams {route} = do
     open ActionM
     postulate
       sameSize : (params : List Param) → List.length params ≡ countParams route
+
+captureParam : ∀ {A : Set} → {{HttpEncodable A}} → String → ActionM A
+captureParam {A} x = do
+  value ← captureParam' (Text.fromStrict x)
+  validate (decode value)
+  where
+    open ActionM
+    validate : Maybe A → ActionM A
+    validate (just x) = pure x
+    validate nothing = raise "Invalid parameter"
