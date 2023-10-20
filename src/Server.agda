@@ -1,4 +1,3 @@
-{-# OPTIONS --guardedness #-}
 module Server where
 
 import Route

@@ -1,5 +1,3 @@
-{-# OPTIONS --guardedness #-}
-
 module Main where
 
 open import Data.Bool using (T?; true; Bool; false)

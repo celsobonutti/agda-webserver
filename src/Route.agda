@@ -1,4 +1,3 @@
-{-# OPTIONS --guardedness #-}
 module Route where
 
 import Agda.Builtin.Unit as Prim

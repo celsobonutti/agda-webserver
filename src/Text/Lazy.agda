@@ -3,6 +3,7 @@ module Text.Lazy where
 open import Data.String renaming (String to Text)
 open import Agda.Builtin.FromString
 open import Data.Unit
+open import Data.Nat
 
 {-# FOREIGN GHC
 

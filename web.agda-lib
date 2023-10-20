@@ -1,0 +1,6 @@
+name: web
+include: src
+depend:
+  standard-library-2.0
+  agdarsec
+flags: --guardedness

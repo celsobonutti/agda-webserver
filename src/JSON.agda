@@ -7,7 +7,8 @@ open import Data.Nat using (ℕ)
 open import Data.List hiding (null)
 open import Data.Tree.AVL.Map <-strictTotalOrder-≈
 open import Data.String using (String)
-open import Foreign.Haskell.Pair using (Pair; fromForeign)
+open import Foreign.Haskell.Pair using (Pair)
+open import Foreign.Haskell.Coerce using (pair-fromFFI)
 open import Function.Base using (_∘_; id)
 open import Data.Product using (map₂)
 
@@ -59,12 +60,3 @@ data JSON : Set where
   array : List JSON → JSON
   object : Map JSON → JSON
   string : String → JSON
-
-{-# NON_TERMINATING #-}
-convert : IntermediaryValue → JSON
-convert null' = null
-convert (number' x) = number x
-convert (bool' x) = bool x
-convert (array' x) = array (Data.List.map convert x)
-convert (object' x) = object (fromList (Data.List.map (map₂ convert ∘ fromForeign) x))
-convert (string' x) = string x

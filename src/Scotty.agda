@@ -1,4 +1,3 @@
-{-# OPTIONS --guardedness #-}
 module Scotty where
 
 open import Data.Nat using (ℕ)
