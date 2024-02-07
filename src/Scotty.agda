@@ -11,7 +11,7 @@ import Data.Vec as Vec
 import Data.String as String
 open import Data.List using (List)
 open import Agda.Builtin.FromString
-open import Foreign.Haskell.Pair using (Pair)
+open import Foreign.Haskell.Pair using (Pair; snd; fst)
 import Data.Char as Char
 open import Data.Char using (Char)
 open import IO.Base using (IO)
@@ -19,10 +19,30 @@ open import Data.Nat.Base
 import Data.List.Base as List
 open import Data.List hiding (wordsBy; _++_)
 open import Function.Base using (_∘_; id)
+open import Data.Product using (_,_; _×_; proj₁; proj₂)
 open import Data.Bool using (T?; true; Bool; false)
 open import Data.Unit.Polymorphic.Base
 import Text.Lazy as Text
 open import Text.Lazy using (LazyString)
+open import Data.String.Instances
+import Data.String.Properties as StringProperties
+open import Data.List.Relation.Unary.Unique.DecSetoid StringProperties.≈-decSetoid using (Unique; unique?)
+open import Relation.Nullary.Decidable using (True; _×-dec_; Dec)
+open import Data.Nat.Properties using (_≤?_; _≥?_; _≟_)
+open import Data.Sum using (_⊎_)
+open import Effect.Monad using (RawMonad)
+open RawMonad ⦃...⦄
+open import Effect.Applicative using (RawApplicative)
+open import Effect.Functor using (RawFunctor)
+open import Data.HTTP.Encodable
+open import Route.Parser
+open import Data.List.Instances
+open import Data.Vec.Instances
+open import IO.Instances
+open import IO.Base using (lift)
+open import Data.Vec renaming (map to map-v)
+open import Data.String.Properties using (≤-decTotalOrder-≈; <-strictTotalOrder-≈)
+open import Data.Tree.AVL.Map <-strictTotalOrder-≈
 
 {-# FOREIGN GHC
 
@@ -31,33 +51,32 @@ import Web.Scotty.Internal.Types
 import Data.ByteString
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text as T
+import Control.Exception.Base hiding (throw)
 
-captureParam' :: LT.Text -> ActionM T.Text
-captureParam' = captureParam
+newtype DecodeError = DecodeError T.Text
+
+instance Show DecodeError where
+  show _ = "DecodeError"
+
+instance Exception DecodeError
 
 #-}
 
 Param : Set
-Param = Pair Text.Lazy Text.Lazy
-
-record HttpEncodable {a} (A : Set a) : Set a where
-  field
-    encode : A → String
-    decode : String → Maybe A
-
-open HttpEncodable {{...}} public
+Param = Pair String String
 
 postulate
   ScottyM : Set → Set
   ActionM : Set → Set
   RoutePattern : Set
-  Capture : Text.Lazy → RoutePattern
+  Capture : String → RoutePattern
   get' : RoutePattern → ActionM Prim.⊤ → ScottyM Prim.⊤
   scotty' : ℕ → ScottyM Prim.⊤ → Prim.IO Prim.⊤
   text' : Text.Lazy → ActionM Prim.⊤
-  raise : {A : Set} → Text.Lazy → ActionM A
+  throw : {A : Set} → String → ActionM A
   captureParams' : ActionM (List Param)
-  captureParam' : Text.Lazy → ActionM String
+  queryParams' : ActionM (List Param)
+
 
 {-# COMPILE GHC ActionM = type ActionM #-}
 {-# COMPILE GHC ScottyM = type ScottyM #-}
@@ -66,87 +85,104 @@ postulate
 {-# COMPILE GHC get' = get #-}
 {-# COMPILE GHC scotty' = \p -> scotty (fromIntegral p) #-}
 {-# COMPILE GHC text' = text #-}
-{-# COMPILE GHC raise = \_ -> raise #-}
+{-# COMPILE GHC throw = \_ s -> throw (DecodeError s) #-}
 {-# COMPILE GHC captureParams' = captureParams #-}
-{-# COMPILE GHC captureParam' = captureParam' #-}
+{-# COMPILE GHC queryParams' = queryParams #-}
 
 module ActionM where
   postulate
-    _>>=_ : { A B : Set } → ActionM A → (A → ActionM B) → ActionM B
-    _>>_ : { A B : Set } → ActionM A → ActionM B → ActionM B
-    pure : { A : Set } → A → ActionM A
-  {-# COMPILE GHC _>>=_ = \_ _ -> (>>=) #-}
-  {-# COMPILE GHC _>>_ = \_ _ -> (>>) #-}
-  {-# COMPILE GHC pure = \_ -> pure #-}
+    _>>=ₐ_ : { A B : Set } → ActionM A → (A → ActionM B) → ActionM B
+    _<*>ₐ_ : { A B : Set } → ActionM (A → B) → ActionM A → ActionM B
+    _<$>ₐ_ : { A B : Set } → (A → B) → ActionM A → ActionM B
+    pureₐ : { A : Set } → A → ActionM A
+  {-# COMPILE GHC _>>=ₐ_ = \_ _ -> (>>=) #-}
+  {-# COMPILE GHC pureₐ = \_ -> pure #-}
+  {-# COMPILE GHC _<$>ₐ_ = \_ _ -> fmap #-}
+  {-# COMPILE GHC _<*>ₐ_ = \_ _ -> (<*>) #-}
+
 
 module ScottyM where
   postulate
-    _>>=_ : { A B : Set } → ScottyM A → (A → ScottyM B) → ScottyM B
-    _>>_ : { A B : Set } → ScottyM A → ScottyM B → ScottyM B
-    pure : { A : Set } → A → ScottyM A
-  {-# COMPILE GHC _>>=_ = \_ _ -> (>>=) #-}
-  {-# COMPILE GHC _>>_ = \_ _ -> (>>) #-}
-  {-# COMPILE GHC pure = \_ -> pure #-}
+    _>>=ₛ_ : { A B : Set } → ScottyM A → (A → ScottyM B) → ScottyM B
+    _<*>ₛ_ : { A B : Set } → ScottyM (A → B) → ScottyM A → ScottyM B
+    _<$>ₛ_ : { A B : Set } → (A → B) → ScottyM A → ScottyM B
+    pureₛ : { A : Set } → A → ScottyM A
+  {-# COMPILE GHC _>>=ₛ_ = \_ _ -> (>>=) #-}
+  {-# COMPILE GHC pureₛ = \_ -> pure #-}
+  {-# COMPILE GHC _<$>ₛ_ = \_ _ -> fmap #-}
+  {-# COMPILE GHC _<*>ₛ_ = \_ _ -> (<*>) #-}
+
+
+instance
+  actionRawFunctor : RawFunctor ActionM
+  actionRawFunctor = record
+    { _<$>_ = ActionM._<$>ₐ_
+    }
+
+  actionRawApp : RawApplicative ActionM
+  actionRawApp = record
+    { _<*>_ = ActionM._<*>ₐ_
+    ; pure = ActionM.pureₐ
+    ; rawFunctor = actionRawFunctor
+    }
+
+  actionRawMonad : RawMonad ActionM
+  actionRawMonad = record
+    { _>>=_ = ActionM._>>=ₐ_
+    ; rawApplicative = actionRawApp
+    }
+
+  scottyRawFunctor : RawFunctor ScottyM
+  scottyRawFunctor = record
+    { _<$>_ = ScottyM._<$>ₛ_
+    }
+
+  scottyRawApp : RawApplicative ScottyM
+  scottyRawApp = record
+    { _<*>_ = ScottyM._<*>ₛ_
+    ; pure = ScottyM.pureₛ
+    ; rawFunctor = scottyRawFunctor
+    }
+
+  scottyRawMonad : RawMonad ScottyM
+  scottyRawMonad = record
+    { _>>=_ = ScottyM._>>=ₛ_
+    ; rawApplicative = scottyRawApp
+    }
+
 
 get : String → ActionM Prim.⊤ → ScottyM Prim.⊤
-get = get' ∘ Capture ∘ Text.fromStrict
+get = get' ∘ Capture
 
 text : String → ActionM Prim.⊤
 text = text' ∘ Text.fromStrict
 
-scotty : (port : ℕ) → {{port ∸ 65535 ≡ 0}} → ScottyM Prim.⊤ → IO ⊤
+scotty : (port : ℕ) → {True (port ≤? 65536)} → ScottyM Prim.⊤ → IO ⊤
 scotty port action = do
   lift (scotty' port action)
     >>= λ _ → pure tt
-  where open IO.Base
-
-isParameter : String → Bool
-isParameter = isParameter' ∘ String.toList
-  where
-  isParameter' : List Char → Bool
-  isParameter' (':' ∷ _) = true
-  isParameter' _ = false
-
-splitPaths : String → List String
-splitPaths = wordsBy ('/' Char.≟_)
-
-getParams' : String → List String
-getParams' = List.filter (T? ∘ isParameter) ∘ splitPaths
-
-countParams : String → ℕ
-countParams = List.length ∘ getParams'
-
-getParams : (route : String) → Vec String (countParams route)
-getParams = Vec.map (String.fromList ∘ dropDoubleCollon ∘ String.toList) ∘ Vec.fromList ∘ getParams'
-  where dropDoubleCollon : List Char → List Char
-        dropDoubleCollon (':' ∷ tail) = dropDoubleCollon tail
-        dropDoubleCollon x = x
 
 replaceVecSize : ∀ {n m : ℕ} {A : Set} → Vec A n → (n ≡ m) → Vec A m
 replaceVecSize xs refl = xs
 
-getParam : (route : String) → { countParams route ≡ 1 } → String
-getParam route { params } =
-  Vec.head param
-  where
-    param : Vec String 1
-    param = replaceVecSize (getParams route) params
+accumQueryParams : List Param → Map (List String)
+accumQueryParams = List.foldr (λ param → insertWith (fst param)
+                                 λ current → (snd param) ∷ Data.Maybe.fromMaybe [] current)
+                              empty
 
-captureParams : {route : String} → ActionM (Vec Param (countParams route))
-captureParams {route} = do
+queryParams : ∀ {route}
+            → {True (validRoute? route)}
+            → ActionM (Map (List String))
+queryParams = do
+  params ← queryParams'
+  pure (accumQueryParams params)
+
+captureParams : {route : String}
+  → {p : True (validRoute? route)}
+  → ActionM (Vec String (countPathVariables route {p}))
+captureParams {route} {p = p} = do
   params ← captureParams'
-  pure (replaceVecSize (Vec.fromList params) (sameSize params))
+  pure (map-v (snd) (Vec.reverse (replaceVecSize (Vec.fromList params) (sameSize params))))
   where
-    open ActionM
     postulate
-      sameSize : (params : List Param) → List.length params ≡ countParams route
-
-captureParam : ∀ {A : Set} → {{HttpEncodable A}} → String → ActionM A
-captureParam {A} x = do
-  value ← captureParam' (Text.fromStrict x)
-  validate (decode value)
-  where
-    open ActionM
-    validate : Maybe A → ActionM A
-    validate (just x) = pure x
-    validate nothing = raise "Invalid parameter"
+      sameSize : (params : List Param) → List.length params ≡ countPathVariables route {p}

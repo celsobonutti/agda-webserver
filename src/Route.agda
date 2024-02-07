@@ -3,124 +3,227 @@ module Route where
 import Agda.Builtin.Unit as Prim
 open import Data.Nat using (ℕ; suc)
 open import Data.String using (String)
-open import Data.Maybe using (Maybe; just; nothing)
-open import Data.List using (List; _++_; [_])
+open import Data.Maybe as Maybe using (Maybe; just; nothing; fromMaybe)
+open import Data.List using (List; _++_; [_]; _∷_; [])
 import Data.Nat.Show as Nat
-open import Scotty using (countParams; captureParams; ScottyM)
+open import Scotty using (ScottyM; ActionM)
 open import Data.Bool using (T?; true; Bool; false)
 open import Relation.Binary.PropositionalEquality hiding ([_])
-open import Data.Vec using (Vec; _∷_; [])
 import Data.List as List
 import Data.Vec as Vec
 import Scotty
-open import Function.Base using (_∘_; id)
+open import Function.Base using (_∘_; id; _|>_; _$_; case_of_)
 import Foreign.Haskell.Pair as Pair
 import Text.Lazy as Text
-open Scotty using (HttpEncodable)
-open HttpEncodable {{...}}
+import Data.String.Properties as StringProperties
+open import Data.HTTP.Encodable
+open import Relation.Nullary.Decidable using (True)
+open import Data.List.Relation.Unary.Unique.DecSetoid StringProperties.≈-decSetoid using (Unique; unique?)
+open import Data.Product using (_×_; _,_; proj₂; proj₁)
+open import Route.Parser
+open import UnifiesWithTuple
+open import Effect.Monad
+open RawMonad ⦃...⦄ hiding (return)
+open HttpEncodable ⦃...⦄
+open import Data.Vec renaming ([] to []̬; _∷_ to _∷̬_; _++_ to _++̬_)
+open import Data.String.Properties using (≤-decTotalOrder-≈; <-strictTotalOrder-≈)
+open import Data.Tree.AVL.Map <-strictTotalOrder-≈ as Map
+import Data.List.Properties as ListProperties
 
-data Appliable : ℕ → Set₁ where
-  Mk : Appliable 0
-  Apply : {n : ℕ} → (X : Set) → {{HttpEncodable X}} → Appliable n → Appliable (suc n)
+uncurryInput : ∀ {t n} → UnifiesWithTuple t n → Set → Set
+uncurryInput (tup {n} {t₁} t₂-unifies) returnType = t₁ → uncurryInput t₂-unifies returnType
+uncurryInput (base {t}) returnType = t → returnType
 
-⟨_⟩ : (X : Set) → {{HttpEncodable X}} → Appliable 1
-⟨ x ⟩ = Apply x Mk
+uncurryInputV : ∀ {t n} → UnifiesWithTupleV t n → Set → Set
+uncurryInputV (tupL {_} {t} unifies) returnType = List t → uncurryInputV unifies returnType
+uncurryInputV (tupO {_} {t} unifies) returnType = Maybe t → uncurryInputV unifies returnType
+uncurryInputV (tupC {_} {t} unifies) returnType = t → uncurryInputV unifies returnType
+uncurryInputV (baseL {t}) returnType = List t → returnType
+uncurryInputV (baseO {t}) returnType = Maybe t → returnType
+uncurryInputV (baseC {t}) returnType = t → returnType
 
-_⟫ : (X : Set) → {{HttpEncodable X}} → Appliable 1
-_⟫ x = Apply x Mk
+decodeAsFailure : ∀ {A}
+               → ⦃ HttpEncodable A ⦄
+               → String
+               → ActionM A
+decodeAsFailure {A} ⦃ httpEncodable ⦄ value =
+  case HttpEncodable.decode httpEncodable value of λ where
+    (just result) → pure result
+    nothing → Scotty.throw "Could not decode input"
 
-⟪_ : (X : Set) → Set
-⟪ x = x
+decodeListAsFailure : ∀ {A}
+                → ⦃ HttpEncodable A ⦄
+                → List String
+                → ActionM (List A)
+decodeListAsFailure ⦃ httpEncodable ⦄ [] =
+  pure []
+decodeListAsFailure ⦃ httpEncodable ⦄ (x ∷ xs) = do
+  decodedX ← decodeAsFailure ⦃ httpEncodable ⦄ x
+  decodedXS ← decodeListAsFailure ⦃ httpEncodable ⦄ xs
+  pure (decodedX ∷ decodedXS)
 
-_×_ : ∀ {n : ℕ} → (X : Set) → Appliable n → {{HttpEncodable X}} → Appliable (suc n)
-x × ap = Apply x ap
 
-infix 10 ⟪_
-infix 15 _⟫
-infixr 5 _×_
+applyInput : ∀ {n arguments A}
+          → ⦃ unifies : UnifiesWithTuple arguments n ⦄
+          → Vec String n
+          → uncurryInput unifies (ActionM A)
+          → ActionM A
+applyInput ⦃ base {t} ⦃ httpEncodable ⦄ ⦄ (value ∷̬ []̬) f = do
+  decodedValue ← decodeAsFailure ⦃ httpEncodable ⦄ value
+  f decodedValue
+applyInput ⦃ tup {n} {t₁} ⦃ httpEncodable ⦄ t₂-unifies ⦄ (param ∷̬ params) f = do
+  decodedParam ← decodeAsFailure ⦃ httpEncodable ⦄ param
+  applyInput ⦃ t₂-unifies ⦄ params (f decodedParam)
 
-toFunction : {n : ℕ} → Appliable n → Set → Set
-toFunction Mk ret = ret
-toFunction (Apply T applies) ret = T → toFunction applies ret
+applyInputV : ∀ {t s arguments A}
+           → ⦃ unifies : UnifiesWithTupleV arguments t ⦄
+           → s ≡ List.length t
+           → Vec String s
+           → Map (List String)
+           → uncurryInputV unifies (ActionM A)
+           → ActionM A
+applyInputV ⦃ unifies = tupC u ⦄ refl (paramName ∷̬ paramNames) params f with Map.lookup params paramName
+... | just (value ∷ []) = do
+  decodedValue ← decodeAsFailure value
+  applyInputV ⦃ u ⦄ refl paramNames params (f decodedValue)
+... | just _ = Scotty.throw "Could not decode input"
+... | nothing = Scotty.throw "Could not decode input"
+applyInputV ⦃ unifies = tupO { t₁ = t } u ⦄ refl (paramName ∷̬ paramNames) params f with Maybe.fromMaybe [] (Map.lookup params paramName)
+... | [] =
+  applyInputV ⦃ u ⦄ refl paramNames params (f nothing)
+... | (value ∷ []) = do
+  decodedValue ← decodeAsFailure {t} value
+  applyInputV ⦃ u ⦄ refl paramNames params (f (just decodedValue))
+... | _ = Scotty.throw "Could not decode input"
+applyInputV ⦃ unifies = tupL { t₁ = t } u ⦄ refl (paramName ∷̬ paramNames) params f = do
+  decodedValue ← decodeListAsFailure (Maybe.fromMaybe [] (Map.lookup params paramName))
+  applyInputV ⦃ u ⦄ refl paramNames params (f decodedValue)
+applyInputV ⦃ unifies = baseL ⦄ refl (value ∷̬ []̬) _ f = do
+  decodedValue ← decodeAsFailure value
+  f decodedValue
+applyInputV ⦃ unifies = baseO ⦄ refl (value ∷̬ []̬) _ f = do
+  decodedValue ← decodeAsFailure value
+  f decodedValue
+applyInputV ⦃ unifies = baseC ⦄ refl (value ∷̬ []̬) _ f = do
+  decodedValue ← decodeAsFailure value
+  f decodedValue
 
-record ArgumentForZero : Set₁ where
+applyPathAndQuery : ∀ {pathSize queryList pathArguments queryArguments s A}
+           → ⦃ pathUnifies : UnifiesWithTuple pathArguments pathSize ⦄
+           → ⦃ queryUnifies : UnifiesWithTupleV queryArguments queryList ⦄
+           → Vec String pathSize
+           → s ≡ List.length queryList
+           → Vec String s
+           → Map (List String)
+           → uncurryInput pathUnifies (uncurryInputV queryUnifies (ActionM A))
+           → ActionM A
+applyPathAndQuery ⦃ pathUnifies = tup {t} ⦃ httpEncodable ⦄ pathUnifies ⦄ ⦃ queryUnifies ⦄ (value ∷̬ xs) proof paranNames params f = do
+  decodedValue ← decodeAsFailure ⦃ httpEncodable ⦄ value
+  applyPathAndQuery ⦃ pathUnifies ⦄ ⦃ queryUnifies ⦄ xs proof paranNames params (f decodedValue)
+applyPathAndQuery ⦃ pathUnifies = base {t} ⦃ httpEncodable ⦄ ⦄ ⦃ queryUnifies ⦄ (value ∷̬ []̬) proof paramNames params f = do
+  decodedValue ← decodeAsFailure ⦃ httpEncodable ⦄ value
+  applyInputV ⦃ queryUnifies ⦄ proof paramNames params (f decodedValue)
+
+
+record ParamsForNone : Set₁ where
   constructor return_through_
   field
     return : Set
     handler : Scotty.ActionM return
-    {{returnEncodable}} : HttpEncodable return
+    ⦃ returnEncodable ⦄ : HttpEncodable return
 
-record ArgumentForOne : Set₁ where
-  constructor receive_return_through_
+record ParamsForPathVar (n : ℕ) : Set₁ where
+  constructor receive-param_return_through_
   field
-    param : Set
+    input : Set
     return : Set
-    handler : param → (Scotty.ActionM return)
-    {{paramEncodable}} : HttpEncodable param
-    {{returnEncodable}} : HttpEncodable return
+    ⦃ returnEncodable ⦄ : HttpEncodable return
+    ⦃ unifiesWithTuple ⦄ : UnifiesWithTuple input n
+    handler : uncurryInput unifiesWithTuple (ActionM return)
 
-infix 3 Get_will_
-infix 5 return_through_
-infix 4 receive_return_through_
-
-record ArgumentForMultiple (n : ℕ) : Set₁ where
-  constructor receive_return_through_
+record ParamsForQueryVar (n : List (String × VarType)) : Set₁ where
+  constructor receive-query_return_through_
   field
-    param : Appliable n
+    input : Set
     return : Set
-    handler : toFunction param (Scotty.ActionM return)
-    {{returnEncodable}} : HttpEncodable return
+    ⦃ returnEncodable ⦄ : HttpEncodable return
+    ⦃ unifiesWithTuple ⦄ : UnifiesWithTupleV input (List.map proj₂ n)
+    handler : uncurryInputV unifiesWithTuple (ActionM return)
 
-fromRouteCount : ℕ → Set₁
-fromRouteCount 0 = ArgumentForZero
-fromRouteCount (suc 0) = ArgumentForOne
-fromRouteCount x@(suc n) = ArgumentForMultiple x
+record ParamsForPathAndQueryVar (n : ℕ) (m : List (String × VarType)) : Set₁ where
+  constructor receive-param_and-query_return_through_
+  field
+    pathParams : Set
+    queryParams : Set
+    return : Set
+    ⦃ returnEncodable ⦄ : HttpEncodable return
+    ⦃ unifiesWithTuple ⦄ : UnifiesWithTuple pathParams n
+    ⦃ unifiesWithTupleV ⦄ : UnifiesWithTupleV queryParams (List.map proj₂ m)
+    handler : uncurryInput unifiesWithTuple (uncurryInputV unifiesWithTupleV (ActionM return))
+
+params-for-get : ℕ → List (String × VarType) → Set₁
+params-for-get ℕ.zero [] = ParamsForNone
+params-for-get ℕ.zero xs@(_ ∷ _) = ParamsForQueryVar xs
+params-for-get x@(suc _) [] = ParamsForPathVar x
+params-for-get x@(suc _) xs@(_ ∷ _) = ParamsForPathAndQueryVar x xs
+
 
 data Route : Set₁ where
-  Get_will_ : (route : String) → fromRouteCount (countParams route) → Route
-  -- Post : (route : String) → (arguments : Appliable (countParams route)) → (body : Set) → (returnType : Set) → toFunction arguments (body → returnType) → Route
+  get_will_ : ∀ s → {p : True (validRoute? s)}
+                  → params-for-get (countPathVariables s {p})
+                                      (makeQueryVariables s {p})
+                  → Route
 
-apply : ∀ {n : ℕ} → {A : Set} → (arguments : Appliable n) → Vec String n → toFunction arguments A → Scotty.ActionM A
-apply Mk _ f = Scotty.ActionM.pure f
-apply {_} {A} (Apply X {{i}} x) (param ∷ tail) f = do
-  param ← Scotty.captureParam param
-  apply x tail (f param)
+
+bothSides : ∀ {A B : Set} → (s : List (A × B)) → List.length (List.map proj₁ s) ≡ List.length (List.map proj₂ s)
+bothSides {A} {B} s = trans left (sym right)
   where
-    open Scotty.ActionM
+    left : List.length (List.map proj₁ s) ≡ List.length s
+    left = ListProperties.length-map proj₁ s
+    right : List.length (List.map proj₂ s) ≡ List.length s
+    right = ListProperties.length-map proj₂ s
 
-open Scotty.ActionM using (pure)
 
 toScottyRoute : Route → ScottyM Prim.⊤
-toScottyRoute (Get route will arguments)                                       with countParams route | Scotty.getParams route
-toScottyRoute (Get route will return returnType through handler)               |                    0 |                  Vec.[] =
-  Scotty.get route payload
-  where
-    open Scotty.ActionM
-    payload : Scotty.ActionM Prim.⊤
-    payload = do
-      value ← handler
-      Scotty.text (encode value)
-toScottyRoute (Get route will receive param return returnType through handler) |              (suc 0) |              p Vec.∷ [] =
-  Scotty.get route payload
-  where
-    open Scotty.ActionM
-    payload : Scotty.ActionM Prim.⊤
-    payload = do
-      param ← Scotty.captureParam p
-      value ← handler param
-      Scotty.text (encode value)
-toScottyRoute (Get route will receive param return returnType through handler) |        (suc (suc n)) |              paramNames =
-  Scotty.get route payload
-  where
-    open Scotty.ActionM
-    payload : Scotty.ActionM Prim.⊤
-    payload = do
-      value ← apply param paramNames handler
-      value ← value
-      Scotty.text (encode value)
+toScottyRoute (get_will_ s {p} params)
+  with countPathVariables s {p} | makeQueryVariables s {p}
+
+toScottyRoute (get route will (return_through_ returnType handler ⦃ returnEncodable ⦄)) | 0 | [] =
+  HttpEncodable.encode returnEncodable
+    <$> handler
+    >>= Scotty.text
+    |> Scotty.get (pathPart route)
+
+toScottyRoute (get_will_ route {p} (receive-param_return_through_ inputType returnType ⦃ returnEncodable ⦄ ⦃ unifiesWithTuple ⦄ handler))
+              | suc n | [] =
+              Scotty.get (pathPart route) $ do
+                params ← Scotty.captureParams {route} {p}
+                result ← applyInput ⦃ unifiesWithTuple ⦄ (Scotty.replaceVecSize params proof) handler
+                Scotty.text (HttpEncodable.encode returnEncodable result)
+              where
+                postulate
+                  -- We know this because of the `with` clause, but Agda can't find it?
+                  proof : countPathVariables route {p} ≡ suc n
+
+toScottyRoute (get_will_ route {p} (receive-query_return_through_ inputType returnType ⦃ returnEncodable ⦄ ⦃ unifiesWithTuple ⦄ handler))
+              | 0 | (x ∷ xs) = Scotty.get (pathPart route) $ do
+                              queryParams ← Scotty.queryParams {route} {p}
+                              result ← applyInputV ⦃ unifiesWithTuple ⦄ (bothSides (x ∷ xs)) (Vec.fromList (List.map proj₁ (x ∷ xs))) queryParams handler
+                              Scotty.text (HttpEncodable.encode returnEncodable result)
+
+
+toScottyRoute (get_will_ route {p} (receive-param_and-query_return_through_ pathParams queryParams returnType ⦃ returnEncodable ⦄ ⦃ unifiesWithTuple ⦄ ⦃ unifiesWithTupleV ⦄ handler))
+              | suc n | (x ∷ xs) =
+              Scotty.get (pathPart route) $ do
+                params ← Scotty.captureParams {route} {p}
+                queryParams ← Scotty.queryParams {route} {p}
+                result ← applyPathAndQuery ⦃ unifiesWithTuple ⦄ ⦃ unifiesWithTupleV ⦄ (Scotty.replaceVecSize params proof) (bothSides (x ∷ xs)) (Vec.fromList (List.map proj₁ (x ∷ xs))) queryParams handler
+                Scotty.text (HttpEncodable.encode returnEncodable result)
+              where
+                postulate
+                  -- We know this because of the `with` clause, but Agda can't find it?
+                  proof : countPathVariables route {p} ≡ suc n
 
 end : List Route
 end = List.[]
 
-_>>_ : Route → List Route → List Route
-x >> y = x List.∷ y

@@ -1,87 +1,75 @@
 module Main where
 
-open import Data.Bool using (T?; true; Bool; false)
 open import Data.String hiding (_<_; _≤_)
 open import Data.Nat.Base
-import IO.Primitive as Prim
-open import IO.Finite using (putStrLn)
-open import IO.Base using (IO; Main; run; lift)
-open import Data.Nat
 open import Agda.Builtin.FromString
 open import Data.String.Literals
-open import Data.Vec using (Vec) renaming (_∷_ to _V∷_; [] to V[])
 import Data.Vec as Vec
-open import Relation.Nullary.Decidable using (True)
-open import Data.Fin hiding (lift; _≤_; _-_)
 import Data.Nat.Show as Nat
-open import Data.Maybe using (just; Maybe; nothing)
-open import Relation.Binary.PropositionalEquality hiding ([_])
-import Data.List.Base as List
-open import Data.List hiding (wordsBy; _++_)
 import Data.Char as Char
-open import Data.Char using (Char)
 import Agda.Builtin.Unit as PrimUnit
 open import Data.Unit.Polymorphic.Base
-import Data.Char.Properties as Char using (_≟_)
-open import Function.Base using (_∘_; id)
-open import Agda.Primitive
+open import Function.Base using (_∘_; id; case_of_)
+open import IO.Base using (IO)
 import Scotty
-import Text.Lazy as Text
-open import Scotty hiding (isParameter; splitPaths; countParams; get)
-open import Text.Lazy using (LazyString)
-open import Server
 open import Route
-open import JSON
+open import Route.Parser
+open import Data.Product using (_×_; _,_)
+open import UnifiesWithTuple
+open import Prelude
+open import Effect.Monad
+open RawMonad ⦃...⦄
+import Server
 
 
 instance
-  StringIsString : IsString String
-  StringIsString = isString
-
-instance
-  natEncodable : HttpEncodable ℕ
-  natEncodable = record { encode = λ n → Nat.show n
-                        ; decode = λ s → Nat.readMaybe 10 s
-                        }
-
-instance
-  stringEncodable : HttpEncodable String
-  stringEncodable = record { encode = id ; decode = just }
-
-instance
-  charEncodable : HttpEncodable Char
-  charEncodable = record { encode = λ _ → "" ; decode = λ _ → nothing }
+  _ : IsString String
+  _ = isString
 
 handler : ℕ → String → Scotty.ActionM String
 handler id name =
-  Scotty.ActionM.pure ("Hello, " ++ name ++ "!\n" ++
+  pure ("Hello, " ++ name ++ "!\n" ++
                        "Your id is " ++ Nat.show id ++ ".")
 
-handler₁ : ℕ → Scotty.ActionM ℕ
-handler₁ id = Scotty.ActionM.pure (suc id)
+handler₁ : {A B : Set} → A → B → Scotty.ActionM A
+handler₁ id _ = pure id
 
-handler₂ : Scotty.ActionM String
-handler₂ = Scotty.ActionM.pure "Hello, world!"
+handler₂ : String → ℕ → Maybe String → Scotty.ActionM String
+handler₂ thing n nothing = pure thing
+handler₂ thing n (just name) = pure (thing ++ name)
+
+handler₃ : ∀ {A} → A → Scotty.ActionM A
+handler₃ = pure
+
+first : Route
+first = get "/:memes/:xd" will
+        receive-param String × String
+        return String
+        through handler₁
+
+second : Route
+second = get "/user" will
+        -- receive-query String × List String
+        return String
+        through (pure "Hello, world!")
+
+third : Route
+third = get "/text/:memes?id&name?" will
+        receive-param String
+        and-query ℕ × Maybe String
+        return String
+        through handler₂
+
 
 main' : IO ⊤
-main' = Server.start 4000 routes' {{s≤s z≤n}}
+main' = Server.start 4000 routes'
   where
     routes' : List Route
-    routes' = do
-      Get "/user/:id/:name" will receive ⟪ ℕ × String ⟫
-                                 return String
-                                 through handler
-
-      Get "/user/:id" will receive ℕ
-                           return ℕ
-                           through handler₁
-
-      Get "/user" will return String
-                       through handler₂
-      end
+    routes' =
+      second
+      ∷ third
+      ∷ []
       where open Route.Route
 
-
-main : Main
-main =
-  run main'
+main : IO.Base.Main
+main = IO.Base.run main'
